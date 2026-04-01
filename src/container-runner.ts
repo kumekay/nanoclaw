@@ -159,6 +159,20 @@ function buildVolumeMounts(
       fs.cpSync(srcDir, dstDir, { recursive: true });
     }
   }
+  // Copy host Claude credentials so the container agent authenticates
+  // directly with Anthropic using the host's OAuth identity.
+  const hostCredentials = path.join(
+    process.env.HOME ?? '/root',
+    '.claude',
+    '.credentials.json',
+  );
+  if (fs.existsSync(hostCredentials)) {
+    fs.copyFileSync(
+      hostCredentials,
+      path.join(groupSessionsDir, '.credentials.json'),
+    );
+  }
+
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
@@ -241,6 +255,22 @@ async function buildContainerArgs(
   });
   if (onecliApplied) {
     logger.info({ containerName }, 'OneCLI gateway config applied');
+    // Host credentials are mounted into the container, so Claude Code
+    // authenticates directly with Anthropic. Bypass the proxy for
+    // Anthropic domains while keeping it active for other services.
+    args.push('-e', 'NO_PROXY=api.anthropic.com,anthropic.com');
+    args.push('-e', 'no_proxy=api.anthropic.com,anthropic.com');
+    // Remove placeholder tokens injected by OneCLI — Claude Code
+    // will use the mounted credentials file instead.
+    for (let i = args.length - 1; i >= 0; i--) {
+      if (
+        args[i] === '-e' &&
+        (args[i + 1]?.startsWith('ANTHROPIC_API_KEY=') ||
+          args[i + 1]?.startsWith('CLAUDE_CODE_OAUTH_TOKEN='))
+      ) {
+        args.splice(i, 2);
+      }
+    }
   } else {
     logger.warn(
       { containerName },

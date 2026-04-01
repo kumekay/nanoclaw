@@ -23,7 +23,7 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 
 ## Secrets / Credentials / Proxy (OneCLI)
 
-API keys, secret keys, OAuth tokens, and auth credentials are managed by the OneCLI gateway — which handles secret injection into containers at request time, so no keys or tokens are ever passed to containers directly. Run `onecli --help`.
+Anthropic auth uses host credentials (`~/.claude/.credentials.json`) mounted into containers. Anthropic traffic bypasses OneCLI via `NO_PROXY`. Other API keys and secrets are managed by the OneCLI gateway. Run `onecli --help`.
 
 ## Skills
 
@@ -65,10 +65,10 @@ launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
 launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
 launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
 
-# Linux (systemd)
-systemctl --user start nanoclaw
-systemctl --user stop nanoclaw
-systemctl --user restart nanoclaw
+# Linux (systemd — system-level service)
+sudo systemctl start nanoclaw
+sudo systemctl stop nanoclaw
+sudo systemctl restart nanoclaw
 ```
 
 ## Troubleshooting
