@@ -6,6 +6,11 @@ import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
+  downloadTelegramFile,
+  extractAudioFromVideo,
+  transcribeAudio,
+} from '../transcription.js';
+import {
   Channel,
   OnChatMetadata,
   OnInboundMessage,
@@ -202,9 +207,140 @@ export class TelegramChannel implements Channel {
     };
 
     this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
-    this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
-    this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
-    this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
+
+    // Voice and audio: download and transcribe
+    const transcribeAndStore = async (
+      ctx: any,
+      fileId: string,
+      label: string,
+      filename: string,
+    ) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+
+      let content: string;
+      try {
+        const file = await this.bot!.api.getFile(fileId);
+        if (!file.file_path) throw new Error('No file_path in response');
+        const buffer = await downloadTelegramFile(this.botToken, file.file_path);
+        if (!buffer) throw new Error('Failed to download file');
+        const transcript = await transcribeAudio(buffer, filename);
+        content = transcript
+          ? `[${label}: ${transcript}]${caption}`
+          : `[${label} - transcription unavailable]${caption}`;
+      } catch (err) {
+        logger.error({ err, chatJid, label }, 'Transcription pipeline failed');
+        content = `[${label} - transcription failed]${caption}`;
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+      });
+    };
+
+    // Video/video_note: extract audio with ffmpeg, then transcribe
+    const transcribeVideoAndStore = async (
+      ctx: any,
+      fileId: string,
+      label: string,
+    ) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+
+      let content: string;
+      try {
+        const file = await this.bot!.api.getFile(fileId);
+        if (!file.file_path) throw new Error('No file_path in response');
+        const videoBuffer = await downloadTelegramFile(
+          this.botToken,
+          file.file_path,
+        );
+        if (!videoBuffer) throw new Error('Failed to download file');
+        const audioBuffer = await extractAudioFromVideo(videoBuffer, '.mp4');
+        if (!audioBuffer) throw new Error('Failed to extract audio from video');
+        const transcript = await transcribeAudio(audioBuffer, 'audio.ogg');
+        content = transcript
+          ? `[${label}: ${transcript}]${caption}`
+          : `[${label} - transcription unavailable]${caption}`;
+      } catch (err) {
+        logger.error({ err, chatJid, label }, 'Video transcription failed');
+        content = `[${label} - transcription failed]${caption}`;
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: ctx.message.message_id.toString(),
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+      });
+    };
+
+    this.bot.on('message:voice', (ctx) =>
+      transcribeAndStore(ctx, ctx.message.voice.file_id, 'Voice', 'voice.ogg'),
+    );
+    this.bot.on('message:audio', (ctx) =>
+      transcribeAndStore(
+        ctx,
+        ctx.message.audio.file_id,
+        'Audio',
+        ctx.message.audio.file_name || 'audio.mp3',
+      ),
+    );
+    this.bot.on('message:video', (ctx) =>
+      transcribeVideoAndStore(ctx, ctx.message.video.file_id, 'Video'),
+    );
+    this.bot.on('message:video_note', (ctx) =>
+      transcribeVideoAndStore(
+        ctx,
+        ctx.message.video_note.file_id,
+        'Video note',
+      ),
+    );
     this.bot.on('message:document', (ctx) => {
       const name = ctx.message.document?.file_name || 'file';
       storeNonText(ctx, `[Document: ${name}]`);
