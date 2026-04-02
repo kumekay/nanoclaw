@@ -240,7 +240,10 @@ export class TelegramChannel implements Channel {
       try {
         const file = await this.bot!.api.getFile(fileId);
         if (!file.file_path) throw new Error('No file_path in response');
-        const buffer = await downloadTelegramFile(this.botToken, file.file_path);
+        const buffer = await downloadTelegramFile(
+          this.botToken,
+          file.file_path,
+        );
         if (!buffer) throw new Error('Failed to download file');
         const transcript = await transcribeAudio(buffer, filename);
         content = transcript

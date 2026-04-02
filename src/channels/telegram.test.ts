@@ -34,10 +34,8 @@ const mockDownloadTelegramFile = vi
   .mockResolvedValue(Buffer.from('audio'));
 vi.mock('../transcription.js', () => ({
   transcribeAudio: (...args: any[]) => mockTranscribeAudio(...args),
-  extractAudioFromVideo: (...args: any[]) =>
-    mockExtractAudioFromVideo(...args),
-  downloadTelegramFile: (...args: any[]) =>
-    mockDownloadTelegramFile(...args),
+  extractAudioFromVideo: (...args: any[]) => mockExtractAudioFromVideo(...args),
+  downloadTelegramFile: (...args: any[]) => mockDownloadTelegramFile(...args),
 }));
 
 // --- Grammy mock ---
