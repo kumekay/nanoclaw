@@ -179,6 +179,16 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Mount gws CLI credentials so container agents can access Google Workspace APIs
+  const gwsConfigDir = path.join(process.env.HOME ?? '/root', '.config', 'gws');
+  if (fs.existsSync(gwsConfigDir)) {
+    mounts.push({
+      hostPath: gwsConfigDir,
+      containerPath: '/home/node/.config/gws',
+      readonly: true,
+    });
+  }
+
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
   const groupIpcDir = resolveGroupIpcPath(group.folder);

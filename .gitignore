@@ -34,5 +34,10 @@ groups/global/*
 
 # Skills system (local per-installation state)
 .nanoclaw/
+.agents/
+
+# Generated skills (restored from skills-lock.json at build time)
+container/skills/gws-*
+.claude/skills/gws-*
 
 agents-sdk-docs
