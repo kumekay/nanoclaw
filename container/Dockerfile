@@ -1,7 +1,7 @@
 # NanoClaw Agent Container
 # Runs Claude Agent SDK in isolated Linux VM with browser automation
 
-FROM node:22-slim
+FROM node:24-trixie-slim
 
 # Install system dependencies for Chromium
 RUN apt-get update && apt-get install -y \
@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y \
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser and claude-code globally
+# Install agent-browser, claude-code, and gws CLI globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code @googleworkspace/cli
 
 # Create app directory
