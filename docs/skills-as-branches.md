@@ -11,7 +11,7 @@ NanoClaw has four types of skills overall. See [CONTRIBUTING.md](../CONTRIBUTING
 | **Feature** (this doc) | `.claude/skills/` + `skill/*` branch | SKILL.md has instructions; code lives on a branch, applied via `git merge` |
 | **Utility** | `.claude/skills/<name>/` with code files | Self-contained tools; code in skill directory, copied into place on install |
 | **Operational** | `.claude/skills/` on `main` | Instruction-only workflows (setup, debug, update) |
-| **Container** | `container/skills/` | Loaded inside agent containers at runtime |
+| **Container** | `container/skills/` and `<additional-mount>/.claude/skills/` | Loaded inside agent containers at runtime |
 
 ---
 

@@ -149,14 +149,35 @@ function buildVolumeMounts(
   }
 
   // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
+  const skillSources: string[] = [
+    path.join(process.cwd(), 'container', 'skills'),
+  ];
+  // Also sync skills from any additional mounts (e.g. notes/.claude/skills).
+  // Validation happens later in buildVolumeMounts; re-validate here so we
+  // only read from paths the allowlist permits.
+  if (group.containerConfig?.additionalMounts) {
+    const validatedExtra = validateAdditionalMounts(
+      group.containerConfig.additionalMounts,
+      group.name,
+      isMain,
+    );
+    for (const m of validatedExtra) {
+      skillSources.push(path.join(m.hostPath, '.claude', 'skills'));
+    }
+  }
+  for (const skillsSrc of skillSources) {
+    if (!fs.existsSync(skillsSrc)) continue;
     for (const skillDir of fs.readdirSync(skillsSrc)) {
       const srcDir = path.join(skillsSrc, skillDir);
+      // stat (not lstat) so a symlinked skill directory is treated as a dir
       if (!fs.statSync(srcDir).isDirectory()) continue;
       const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
+      // dereference: follow symlinks and copy real content. Skill files
+      // (e.g. SKILL.md) are often symlinks back to the user's notes vault;
+      // the container only sees the bind-mounted host paths, so we must
+      // materialize the content into the group's sessions directory.
+      fs.cpSync(srcDir, dstDir, { recursive: true, dereference: true });
     }
   }
   // Copy host Claude credentials so the container agent authenticates

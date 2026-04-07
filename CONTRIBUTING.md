@@ -80,9 +80,14 @@ Workflows and guides with no code changes. The SKILL.md is the entire skill — 
 
 #### 4. Container skills (agent runtime)
 
-Skills that run inside the agent container, not on the host. These teach the container agent how to use tools, format output, or perform tasks. They are synced into each group's `.claude/skills/` directory when a container starts.
+Skills that run inside the agent container, not on the host. These teach the container agent how to use tools, format output, or perform tasks. On every container start they are synced into the group's `~/.claude/skills/` directory inside the container.
 
-**Location:** `container/skills/<name>/`
+**Load locations** (all merged into the same `~/.claude/skills/` inside the container):
+
+1. **Built-in container skills** — `container/skills/<name>/` in the project repo. Available to every group. Use this for skills that ship with NanoClaw (e.g. browser, status, channel formatting).
+2. **Per-mount skills** — `<additional-mount>/.claude/skills/<name>/` on any validated additional mount configured for the group. Use this to keep skills next to the data they operate on (e.g. notes-related skills inside a `notes` mount at `notes/.claude/skills/`). Each mount must already be allowed by `~/.config/nanoclaw/mount-allowlist.json`. Symlinks inside a per-mount skill directory are dereferenced — the actual file content is copied into the group's sessions directory so the container can read it without needing the symlink target to be mounted.
+
+Skills with the same directory name later in the list overwrite earlier ones, so per-mount skills can override built-ins for a specific group.
 
 **Examples:** `agent-browser` (web browsing), `capabilities` (/capabilities command), `status` (/status command), `slack-formatting` (Slack mrkdwn syntax)
 
