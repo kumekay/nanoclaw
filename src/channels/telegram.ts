@@ -8,6 +8,7 @@ import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
+import { getTopicHandler, type MediaPayload } from '../topic-handlers/index.js';
 import {
   downloadTelegramFile,
   extractAudioFromVideo,
@@ -27,25 +28,44 @@ export interface TelegramChannelOpts {
 }
 
 /**
- * Send a message with Telegram Markdown parse mode, falling back to plain text.
- * Claude's output naturally matches Telegram's Markdown v1 format:
- *   *bold*, _italic_, `code`, ```code blocks```, [links](url)
+ * Send a message with the requested Telegram parse mode, falling back to
+ * plain text on parse errors. Claude's output naturally matches Telegram's
+ * Markdown v1 format (*bold*, _italic_, `code`, ```code blocks```,
+ * [links](url)); topic handlers that need richer formatting (e.g. expandable
+ * blockquotes for diary entries) can request HTML.
  */
 async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
   chatId: string | number,
   text: string,
-  options: { message_thread_id?: number } = {},
+  options: {
+    message_thread_id?: number;
+    parseMode?: 'HTML' | 'Markdown';
+  } = {},
 ): Promise<void> {
+  const parseMode = options.parseMode ?? 'Markdown';
+  const apiOptions: {
+    message_thread_id?: number;
+    parse_mode: 'HTML' | 'Markdown';
+  } = {
+    parse_mode: parseMode,
+  };
+  if (options.message_thread_id !== undefined) {
+    apiOptions.message_thread_id = options.message_thread_id;
+  }
   try {
-    await api.sendMessage(chatId, text, {
-      ...options,
-      parse_mode: 'Markdown',
-    });
+    await api.sendMessage(chatId, text, apiOptions);
   } catch (err) {
-    // Fallback: send as plain text if Markdown parsing fails
-    logger.debug({ err }, 'Markdown send failed, falling back to plain text');
-    await api.sendMessage(chatId, text, options);
+    // Fallback: send as plain text if parse_mode parsing fails
+    logger.debug(
+      { err, parseMode },
+      'Telegram parse_mode send failed, falling back to plain text',
+    );
+    const plainOptions: { message_thread_id?: number } = {};
+    if (options.message_thread_id !== undefined) {
+      plainOptions.message_thread_id = options.message_thread_id;
+    }
+    await api.sendMessage(chatId, text, plainOptions);
   }
 }
 
@@ -83,6 +103,17 @@ export class TelegramChannel implements Channel {
       );
     });
 
+    // Command to get the current forum topic id (for topic-handler config).
+    // Reply when invoked outside of a topic so the user knows they're in General.
+    this.bot.command('topicid', (ctx) => {
+      const tid = (ctx.message as any)?.message_thread_id;
+      if (tid !== undefined) {
+        ctx.reply(`Topic ID: \`${tid}\``, { parse_mode: 'Markdown' });
+      } else {
+        ctx.reply('General topic (no thread id)', { parse_mode: 'Markdown' });
+      }
+    });
+
     // Command to check bot status
     this.bot.command('ping', (ctx) => {
       ctx.reply(`${ASSISTANT_NAME} is online.`);
@@ -90,7 +121,7 @@ export class TelegramChannel implements Channel {
 
     // Telegram bot commands handled above — skip them in the general handler
     // so they don't also get stored as messages. All other /commands flow through.
-    const TELEGRAM_BOT_COMMANDS = new Set(['chatid', 'ping']);
+    const TELEGRAM_BOT_COMMANDS = new Set(['chatid', 'topicid', 'ping']);
 
     this.bot.on('message:text', async (ctx) => {
       if (ctx.message.text.startsWith('/')) {
@@ -115,6 +146,21 @@ export class TelegramChannel implements Channel {
         ctx.chat.type === 'private'
           ? senderName
           : (ctx.chat as any).title || chatJid;
+
+      // Topic handler dispatch — runs before metadata/onMessage so the
+      // diary topic (and any future per-topic handler) can fully short-circuit
+      // the main agent loop. Only fires for registered groups inside a forum
+      // topic; the General topic (threadId === undefined) keeps today's flow.
+      const groupForDispatch = this.opts.registeredGroups()[chatJid];
+      if (groupForDispatch && threadId !== undefined) {
+        const consumed = await this.tryTopicHandler(
+          ctx,
+          groupForDispatch,
+          threadId,
+          content,
+        );
+        if (consumed) return;
+      }
 
       // Translate Telegram @bot_username mentions into TRIGGER_PATTERN format.
       // Telegram @mentions (e.g., @andy_ai_bot) won't match TRIGGER_PATTERN
@@ -223,6 +269,42 @@ export class TelegramChannel implements Channel {
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+
+      // Download once and reuse for both topic-handler dispatch and the
+      // existing media-archive fallback.
+      let buffer: Buffer | null = null;
+      let filename = '';
+      try {
+        const photos = ctx.message.photo;
+        const largest = photos[photos.length - 1];
+        const file = await this.bot!.api.getFile(largest.file_id);
+        if (!file.file_path) throw new Error('No file_path in response');
+        buffer = await downloadTelegramFile(this.botToken, file.file_path);
+        if (!buffer) throw new Error('Failed to download photo');
+        const ext = path.extname(file.file_path) || '.jpg';
+        filename = `photo_${ctx.message.message_id}${ext}`;
+      } catch (err) {
+        logger.error({ err, chatJid }, 'Failed to download Telegram photo');
+      }
+
+      // Topic handler dispatch (only if download succeeded — handlers need the buffer)
+      if (buffer) {
+        const consumed = await this.tryTopicHandler(
+          ctx,
+          group,
+          ctx.message.message_thread_id,
+          undefined,
+          {
+            kind: 'photo',
+            buffer,
+            filename,
+            mimeType: 'image/jpeg',
+            caption: ctx.message.caption,
+          },
+        );
+        if (consumed) return;
+      }
+
       this.opts.onChatMetadata(
         chatJid,
         timestamp,
@@ -232,25 +314,11 @@ export class TelegramChannel implements Channel {
       );
 
       let content: string;
-      try {
-        // Telegram sends multiple sizes; pick the largest
-        const photos = ctx.message.photo;
-        const largest = photos[photos.length - 1];
-        const file = await this.bot!.api.getFile(largest.file_id);
-        if (!file.file_path) throw new Error('No file_path in response');
-        const buffer = await downloadTelegramFile(
-          this.botToken,
-          file.file_path,
-        );
-        if (!buffer) throw new Error('Failed to download photo');
-
-        const ext = path.extname(file.file_path) || '.jpg';
-        const filename = `photo_${ctx.message.message_id}${ext}`;
+      if (buffer) {
         const groupDir = resolveGroupFolderPath(group.folder);
         const mediaDir = path.join(groupDir, 'media');
         fs.mkdirSync(mediaDir, { recursive: true });
-        const filePath = path.join(mediaDir, filename);
-        fs.writeFileSync(filePath, buffer);
+        fs.writeFileSync(path.join(mediaDir, filename), buffer);
 
         // Container sees this at /workspace/group/media/
         content = `[Photo: /workspace/group/media/${filename}]${caption}`;
@@ -258,8 +326,7 @@ export class TelegramChannel implements Channel {
           { chatJid, filename, size: buffer.length },
           'Saved photo from Telegram',
         );
-      } catch (err) {
-        logger.error({ err, chatJid }, 'Failed to download Telegram photo');
+      } else {
         content = `[Photo]${caption}`;
       }
 
@@ -274,16 +341,47 @@ export class TelegramChannel implements Channel {
       });
     });
 
-    // Voice and audio: download and transcribe
+    // Voice and audio: download, optionally dispatch to a topic handler,
+    // otherwise transcribe and store via the regular onMessage flow.
     const transcribeAndStore = async (
       ctx: any,
       fileId: string,
       label: string,
       filename: string,
+      mediaKind: 'voice' | 'audio',
+      durationSec: number,
     ) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
+
+      // Download once and reuse for both dispatch and fallback paths.
+      let buffer: Buffer | null = null;
+      try {
+        const file = await this.bot!.api.getFile(fileId);
+        if (!file.file_path) throw new Error('No file_path in response');
+        buffer = await downloadTelegramFile(this.botToken, file.file_path);
+      } catch (err) {
+        logger.error({ err, chatJid, label }, `${label} download failed`);
+      }
+
+      // Topic handler dispatch — diary etc. do their own transcription.
+      if (buffer) {
+        const consumed = await this.tryTopicHandler(
+          ctx,
+          group,
+          ctx.message.message_thread_id,
+          undefined,
+          {
+            kind: mediaKind,
+            buffer,
+            filename,
+            durationSec,
+            caption: ctx.message.caption,
+          },
+        );
+        if (consumed) return;
+      }
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
@@ -304,12 +402,6 @@ export class TelegramChannel implements Channel {
 
       let content: string;
       try {
-        const file = await this.bot!.api.getFile(fileId);
-        if (!file.file_path) throw new Error('No file_path in response');
-        const buffer = await downloadTelegramFile(
-          this.botToken,
-          file.file_path,
-        );
         if (!buffer) throw new Error('Failed to download file');
         const transcript = await transcribeAudio(buffer, filename);
         content = transcript
@@ -331,15 +423,46 @@ export class TelegramChannel implements Channel {
       });
     };
 
-    // Video/video_note: extract audio with ffmpeg, then transcribe
+    // Video/video_note: download, optionally dispatch to a topic handler,
+    // otherwise extract audio with ffmpeg and transcribe.
     const transcribeVideoAndStore = async (
       ctx: any,
       fileId: string,
       label: string,
+      mediaKind: 'video' | 'video_note',
+      durationSec: number,
     ) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
+
+      // Download once
+      let videoBuffer: Buffer | null = null;
+      try {
+        const file = await this.bot!.api.getFile(fileId);
+        if (!file.file_path) throw new Error('No file_path in response');
+        videoBuffer = await downloadTelegramFile(this.botToken, file.file_path);
+      } catch (err) {
+        logger.error({ err, chatJid, label }, `${label} download failed`);
+      }
+
+      // Topic handler dispatch
+      if (videoBuffer) {
+        const consumed = await this.tryTopicHandler(
+          ctx,
+          group,
+          ctx.message.message_thread_id,
+          undefined,
+          {
+            kind: mediaKind,
+            buffer: videoBuffer,
+            filename: `video_${ctx.message.message_id}.mp4`,
+            durationSec,
+            caption: ctx.message.caption,
+          },
+        );
+        if (consumed) return;
+      }
 
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
@@ -360,12 +483,6 @@ export class TelegramChannel implements Channel {
 
       let content: string;
       try {
-        const file = await this.bot!.api.getFile(fileId);
-        if (!file.file_path) throw new Error('No file_path in response');
-        const videoBuffer = await downloadTelegramFile(
-          this.botToken,
-          file.file_path,
-        );
         if (!videoBuffer) throw new Error('Failed to download file');
         const audioBuffer = await extractAudioFromVideo(videoBuffer, '.mp4');
         if (!audioBuffer) throw new Error('Failed to extract audio from video');
@@ -390,7 +507,14 @@ export class TelegramChannel implements Channel {
     };
 
     this.bot.on('message:voice', (ctx) =>
-      transcribeAndStore(ctx, ctx.message.voice.file_id, 'Voice', 'voice.ogg'),
+      transcribeAndStore(
+        ctx,
+        ctx.message.voice.file_id,
+        'Voice',
+        'voice.ogg',
+        'voice',
+        ctx.message.voice.duration ?? 0,
+      ),
     );
     this.bot.on('message:audio', (ctx) =>
       transcribeAndStore(
@@ -398,20 +522,66 @@ export class TelegramChannel implements Channel {
         ctx.message.audio.file_id,
         'Audio',
         ctx.message.audio.file_name || 'audio.mp3',
+        'audio',
+        ctx.message.audio.duration ?? 0,
       ),
     );
     this.bot.on('message:video', (ctx) =>
-      transcribeVideoAndStore(ctx, ctx.message.video.file_id, 'Video'),
+      transcribeVideoAndStore(
+        ctx,
+        ctx.message.video.file_id,
+        'Video',
+        'video',
+        ctx.message.video.duration ?? 0,
+      ),
     );
     this.bot.on('message:video_note', (ctx) =>
       transcribeVideoAndStore(
         ctx,
         ctx.message.video_note.file_id,
         'Video note',
+        'video_note',
+        ctx.message.video_note.duration ?? 0,
       ),
     );
-    this.bot.on('message:document', (ctx) => {
+    this.bot.on('message:document', async (ctx) => {
       const name = ctx.message.document?.file_name || 'file';
+      const fileId = ctx.message.document?.file_id;
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      // Download for topic dispatch path. Documents have no native transcript
+      // pipeline, so the buffer is only needed when a topic handler will use it.
+      let buffer: Buffer | null = null;
+      if (fileId) {
+        try {
+          const file = await this.bot!.api.getFile(fileId);
+          if (file.file_path) {
+            buffer = await downloadTelegramFile(this.botToken, file.file_path);
+          }
+        } catch (err) {
+          logger.error({ err, chatJid }, 'Document download failed');
+        }
+      }
+
+      if (buffer) {
+        const consumed = await this.tryTopicHandler(
+          ctx,
+          group,
+          ctx.message.message_thread_id,
+          undefined,
+          {
+            kind: 'document',
+            buffer,
+            filename: name,
+            mimeType: ctx.message.document?.mime_type,
+            caption: ctx.message.caption,
+          },
+        );
+        if (consumed) return;
+      }
+
       storeNonText(ctx, `[Document: ${name}]`);
     });
     this.bot.on('message:sticker', (ctx) => {
@@ -442,6 +612,79 @@ export class TelegramChannel implements Channel {
         },
       });
     });
+  }
+
+  /**
+   * Resolve the topic handler for a (group, threadId) pair and run it.
+   * Returns true if the handler fully consumed the message; false on any
+   * miss (no thread id, no handler, handler returned consumed=false, or
+   * handler threw — all cases fall through to the default onMessage flow).
+   *
+   * The reply callback wraps {@link sendTelegramMessage} so handlers can
+   * post confirmations back into the originating topic with their preferred
+   * parse mode (HTML for Telegram-native blockquote formatting, Markdown
+   * for Claude-style replies).
+   */
+  private async tryTopicHandler(
+    ctx: any,
+    group: RegisteredGroup,
+    threadId: number | undefined,
+    textContent: string | undefined,
+    media?: MediaPayload,
+  ): Promise<boolean> {
+    if (threadId === undefined) return false;
+    const handler = getTopicHandler(group, threadId.toString());
+    if (!handler) return false;
+
+    const chatJid = `tg:${ctx.chat.id}`;
+    const senderName =
+      ctx.from?.first_name ||
+      ctx.from?.username ||
+      ctx.from?.id?.toString() ||
+      'Unknown';
+    const timestamp = new Date(ctx.message.date * 1000).toISOString();
+    const content = textContent ?? ctx.message.caption ?? '';
+
+    try {
+      const result = await handler.handle({
+        group,
+        chatJid,
+        threadId: threadId.toString(),
+        message: {
+          id: ctx.message.message_id.toString(),
+          chat_jid: chatJid,
+          sender: ctx.from?.id?.toString() || '',
+          sender_name: senderName,
+          content,
+          timestamp,
+          is_from_me: false,
+          thread_id: threadId.toString(),
+        },
+        media,
+        reply: async (
+          text: string,
+          opts?: { parseMode?: 'HTML' | 'Markdown' },
+        ) => {
+          if (!this.bot) return;
+          await sendTelegramMessage(
+            this.bot.api,
+            ctx.chat.id.toString(),
+            text,
+            {
+              message_thread_id: threadId,
+              parseMode: opts?.parseMode,
+            },
+          );
+        },
+      });
+      return result.consumed;
+    } catch (err) {
+      logger.error(
+        { err, chatJid, threadId, handler: handler.name },
+        'topic handler threw — falling back to default flow',
+      );
+      return false;
+    }
   }
 
   async sendMessage(

@@ -15,6 +15,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import './channels/index.js';
+import './topic-handlers/all.js';
 import {
   getChannelFactory,
   getRegisteredChannelNames,

@@ -58,6 +58,20 @@ vi.mock('../transcription.js', () => ({
   downloadTelegramFile: (...args: any[]) => mockDownloadTelegramFile(...args),
 }));
 
+// Mock topic-handlers registry. Tests can swap in a stub handler via
+// `topicHandlerRef.current` to exercise the dispatch path; default is null
+// (no handler — channel falls through to its existing onMessage flow).
+const topicHandlerRef = vi.hoisted(() => ({
+  current: null as null | {
+    name: string;
+    handle: (...args: any[]) => any;
+  },
+}));
+const mockGetTopicHandler = vi.fn((..._args: any[]) => topicHandlerRef.current);
+vi.mock('../topic-handlers/index.js', () => ({
+  getTopicHandler: (...args: any[]) => mockGetTopicHandler(...args),
+}));
+
 // --- Grammy mock ---
 
 type Handler = (...args: any[]) => any;
@@ -137,6 +151,7 @@ function createTextCtx(overrides: {
   messageId?: number;
   date?: number;
   entities?: any[];
+  messageThreadId?: number;
 }) {
   const chatId = overrides.chatId ?? 100200300;
   const chatType = overrides.chatType ?? 'group';
@@ -156,6 +171,7 @@ function createTextCtx(overrides: {
       date: overrides.date ?? Math.floor(Date.now() / 1000),
       message_id: overrides.messageId ?? 1,
       entities: overrides.entities ?? [],
+      message_thread_id: overrides.messageThreadId,
     },
     me: { username: 'andy_ai_bot' },
     reply: vi.fn(),
@@ -170,6 +186,7 @@ function createMediaCtx(overrides: {
   date?: number;
   messageId?: number;
   caption?: string;
+  messageThreadId?: number;
   extra?: Record<string, any>;
 }) {
   const chatId = overrides.chatId ?? 100200300;
@@ -188,17 +205,19 @@ function createMediaCtx(overrides: {
       date: overrides.date ?? Math.floor(Date.now() / 1000),
       message_id: overrides.messageId ?? 1,
       caption: overrides.caption,
+      message_thread_id: overrides.messageThreadId,
       photo: [
         { file_id: 'photo-small', width: 90, height: 90 },
         { file_id: 'photo-large', width: 800, height: 600 },
       ],
-      voice: { file_id: 'voice-file-id', duration: 5 },
+      voice: { file_id: 'voice-file-id', duration: 5, mime_type: 'audio/ogg' },
       audio: {
         file_id: 'audio-file-id',
         duration: 120,
         file_name: 'recording.mp3',
+        mime_type: 'audio/mpeg',
       },
-      video: { file_id: 'video-file-id', duration: 30 },
+      video: { file_id: 'video-file-id', duration: 30, mime_type: 'video/mp4' },
       video_note: { file_id: 'videonote-file-id', duration: 10 },
       ...(overrides.extra || {}),
     },
@@ -228,6 +247,7 @@ async function triggerMediaMessage(
 describe('TelegramChannel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    topicHandlerRef.current = null;
   });
 
   afterEach(() => {
@@ -1077,6 +1097,381 @@ describe('TelegramChannel', () => {
     it('has name "telegram"', () => {
       const channel = new TelegramChannel('test-token', createTestOpts());
       expect(channel.name).toBe('telegram');
+    });
+  });
+
+  // --- Topic handler dispatch ---
+
+  describe('topic handler dispatch', () => {
+    function makeStubHandler() {
+      return {
+        name: 'stub',
+        handle: vi.fn().mockResolvedValue({ consumed: true }),
+      };
+    }
+
+    it('does not call getTopicHandler for messages without a thread id', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({ text: 'general topic' });
+      await triggerTextMessage(ctx);
+
+      expect(mockGetTopicHandler).not.toHaveBeenCalled();
+      expect(opts.onMessage).toHaveBeenCalled();
+    });
+
+    it('routes a text message in a topic to the topic handler and skips onMessage', async () => {
+      const stub = makeStubHandler();
+      topicHandlerRef.current = stub;
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({
+        text: 'diary entry',
+        messageThreadId: 5,
+      });
+      await triggerTextMessage(ctx);
+
+      expect(mockGetTopicHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ folder: 'test-group' }),
+        '5',
+      );
+      expect(stub.handle).toHaveBeenCalledOnce();
+      const handlerCtx = stub.handle.mock.calls[0][0];
+      expect(handlerCtx.threadId).toBe('5');
+      expect(handlerCtx.chatJid).toBe('tg:100200300');
+      expect(handlerCtx.message.content).toBe('diary entry');
+      expect(handlerCtx.media).toBeUndefined();
+      expect(typeof handlerCtx.reply).toBe('function');
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+      expect(opts.onChatMetadata).not.toHaveBeenCalled();
+    });
+
+    it('falls back to onMessage when the topic handler returns consumed=false', async () => {
+      const stub = {
+        name: 'noop',
+        handle: vi.fn().mockResolvedValue({ consumed: false }),
+      };
+      topicHandlerRef.current = stub;
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({
+        text: 'falls through',
+        messageThreadId: 5,
+      });
+      await triggerTextMessage(ctx);
+
+      expect(stub.handle).toHaveBeenCalledOnce();
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ content: 'falls through' }),
+      );
+    });
+
+    it('falls back to onMessage when the topic handler throws', async () => {
+      const stub = {
+        name: 'broken',
+        handle: vi.fn().mockRejectedValue(new Error('boom')),
+      };
+      topicHandlerRef.current = stub;
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({
+        text: 'still delivered',
+        messageThreadId: 5,
+      });
+      await triggerTextMessage(ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ content: 'still delivered' }),
+      );
+    });
+
+    it('does not dispatch when no group is registered for the chat', async () => {
+      topicHandlerRef.current = makeStubHandler();
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({
+        chatId: 999999,
+        text: 'orphan',
+        messageThreadId: 5,
+      });
+      await triggerTextMessage(ctx);
+
+      expect(mockGetTopicHandler).not.toHaveBeenCalled();
+    });
+
+    it('routes a photo in a topic to the topic handler with a MediaPayload', async () => {
+      const stub = makeStubHandler();
+      topicHandlerRef.current = stub;
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      mockDownloadTelegramFile.mockResolvedValueOnce(
+        Buffer.from('photo bytes'),
+      );
+
+      const ctx = createMediaCtx({
+        messageThreadId: 5,
+        caption: 'sunset',
+      });
+      await triggerMediaMessage('message:photo', ctx);
+
+      expect(stub.handle).toHaveBeenCalledOnce();
+      const payload = stub.handle.mock.calls[0][0].media;
+      expect(payload.kind).toBe('photo');
+      expect(payload.buffer).toEqual(Buffer.from('photo bytes'));
+      expect(payload.filename).toMatch(/photo_1\.\w+$/);
+      expect(payload.caption).toBe('sunset');
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('routes a voice message in a topic to the topic handler', async () => {
+      const stub = makeStubHandler();
+      topicHandlerRef.current = stub;
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      mockDownloadTelegramFile.mockResolvedValueOnce(
+        Buffer.from('voice bytes'),
+      );
+
+      const ctx = createMediaCtx({ messageThreadId: 5 });
+      await triggerMediaMessage('message:voice', ctx);
+
+      expect(stub.handle).toHaveBeenCalledOnce();
+      const payload = stub.handle.mock.calls[0][0].media;
+      expect(payload.kind).toBe('voice');
+      expect(payload.buffer).toEqual(Buffer.from('voice bytes'));
+      expect(payload.durationSec).toBe(5);
+      expect(opts.onMessage).not.toHaveBeenCalled();
+      expect(mockTranscribeAudio).not.toHaveBeenCalled();
+    });
+
+    it('routes an audio message in a topic to the topic handler', async () => {
+      const stub = makeStubHandler();
+      topicHandlerRef.current = stub;
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      mockDownloadTelegramFile.mockResolvedValueOnce(
+        Buffer.from('audio bytes'),
+      );
+
+      const ctx = createMediaCtx({ messageThreadId: 5 });
+      await triggerMediaMessage('message:audio', ctx);
+
+      expect(stub.handle).toHaveBeenCalledOnce();
+      const payload = stub.handle.mock.calls[0][0].media;
+      expect(payload.kind).toBe('audio');
+      expect(payload.filename).toBe('recording.mp3');
+      expect(payload.durationSec).toBe(120);
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('routes a video message in a topic to the topic handler', async () => {
+      const stub = makeStubHandler();
+      topicHandlerRef.current = stub;
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      mockDownloadTelegramFile.mockResolvedValueOnce(
+        Buffer.from('video bytes'),
+      );
+
+      const ctx = createMediaCtx({ messageThreadId: 5 });
+      await triggerMediaMessage('message:video', ctx);
+
+      expect(stub.handle).toHaveBeenCalledOnce();
+      const payload = stub.handle.mock.calls[0][0].media;
+      expect(payload.kind).toBe('video');
+      expect(payload.durationSec).toBe(30);
+      expect(opts.onMessage).not.toHaveBeenCalled();
+      // The diary handler does its own audio extraction; the channel must
+      // not eagerly extract on the dispatch path.
+      expect(mockExtractAudioFromVideo).not.toHaveBeenCalled();
+    });
+
+    it('routes a video_note message in a topic to the topic handler', async () => {
+      const stub = makeStubHandler();
+      topicHandlerRef.current = stub;
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      mockDownloadTelegramFile.mockResolvedValueOnce(Buffer.from('vn bytes'));
+
+      const ctx = createMediaCtx({ messageThreadId: 5 });
+      await triggerMediaMessage('message:video_note', ctx);
+
+      expect(stub.handle).toHaveBeenCalledOnce();
+      const payload = stub.handle.mock.calls[0][0].media;
+      expect(payload.kind).toBe('video_note');
+      expect(payload.durationSec).toBe(10);
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('routes a document in a topic to the topic handler', async () => {
+      const stub = makeStubHandler();
+      topicHandlerRef.current = stub;
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      mockDownloadTelegramFile.mockResolvedValueOnce(Buffer.from('pdf bytes'));
+
+      const ctx = createMediaCtx({
+        messageThreadId: 5,
+        extra: {
+          document: {
+            file_id: 'doc-file-id',
+            file_name: 'receipt.pdf',
+            mime_type: 'application/pdf',
+          },
+        },
+      });
+      await triggerMediaMessage('message:document', ctx);
+
+      expect(stub.handle).toHaveBeenCalledOnce();
+      const payload = stub.handle.mock.calls[0][0].media;
+      expect(payload.kind).toBe('document');
+      expect(payload.filename).toBe('receipt.pdf');
+      expect(payload.buffer).toEqual(Buffer.from('pdf bytes'));
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('reply callback sends an HTML message to the originating thread', async () => {
+      let capturedReply: ((text: string, opts?: any) => Promise<void>) | null =
+        null;
+      const stub = {
+        name: 'capture',
+        handle: vi.fn().mockImplementation(async (handlerCtx: any) => {
+          capturedReply = handlerCtx.reply;
+          return { consumed: true };
+        }),
+      };
+      topicHandlerRef.current = stub;
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({
+        text: 'diary entry',
+        messageThreadId: 5,
+      });
+      await triggerTextMessage(ctx);
+
+      expect(capturedReply).not.toBeNull();
+      await capturedReply!('<b>added</b>', { parseMode: 'HTML' });
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        '<b>added</b>',
+        expect.objectContaining({
+          parse_mode: 'HTML',
+          message_thread_id: 5,
+        }),
+      );
+    });
+
+    it('reply callback defaults to Markdown when no parseMode is provided', async () => {
+      let capturedReply: ((text: string, opts?: any) => Promise<void>) | null =
+        null;
+      const stub = {
+        name: 'capture',
+        handle: vi.fn().mockImplementation(async (handlerCtx: any) => {
+          capturedReply = handlerCtx.reply;
+          return { consumed: true };
+        }),
+      };
+      topicHandlerRef.current = stub;
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({ text: 'x', messageThreadId: 5 });
+      await triggerTextMessage(ctx);
+
+      await capturedReply!('plain');
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        'plain',
+        expect.objectContaining({
+          parse_mode: 'Markdown',
+          message_thread_id: 5,
+        }),
+      );
+    });
+  });
+
+  // --- /topicid command ---
+
+  describe('/topicid command', () => {
+    it('replies with the current message_thread_id when invoked inside a topic', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const handler = currentBot().commandHandlers.get('topicid')!;
+      expect(handler).toBeDefined();
+
+      const ctx = {
+        chat: { id: 100200300, type: 'supergroup' as const },
+        message: { message_thread_id: 5 },
+        reply: vi.fn(),
+      };
+      await handler(ctx);
+
+      expect(ctx.reply).toHaveBeenCalled();
+      const [text] = ctx.reply.mock.calls[0];
+      expect(text).toContain('5');
+    });
+
+    it('replies with a "general" hint when invoked outside a topic', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const handler = currentBot().commandHandlers.get('topicid')!;
+      const ctx = {
+        chat: { id: 100200300, type: 'supergroup' as const },
+        message: {},
+        reply: vi.fn(),
+      };
+      await handler(ctx);
+
+      expect(ctx.reply).toHaveBeenCalled();
+      const [text] = ctx.reply.mock.calls[0];
+      expect(text.toLowerCase()).toMatch(/general|none|no topic/);
+    });
+
+    it('is treated as a bot command and not delivered as a regular message', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({ text: '/topicid' });
+      await triggerTextMessage(ctx);
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
     });
   });
 });
