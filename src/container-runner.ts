@@ -16,6 +16,7 @@ import {
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
+import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -56,6 +57,48 @@ interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+}
+
+/**
+ * Returns a long-lived Anthropic credential from process.env or .env, if set.
+ * When present, the container is given this credential as an env var instead
+ * of the host's short-lived `~/.claude/.credentials.json` mount, which expires
+ * within hours and causes recurring 401s for both freshly-spawned containers
+ * (when the host's keychain token has lapsed) and long-running idle containers
+ * (whose mounted file is captured at spawn time and goes stale mid-session).
+ */
+function getLongLivedClaudeAuth():
+  | { varName: 'CLAUDE_CODE_OAUTH_TOKEN' | 'ANTHROPIC_API_KEY'; value: string }
+  | undefined {
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    return {
+      varName: 'CLAUDE_CODE_OAUTH_TOKEN',
+      value: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+    };
+  }
+  if (process.env.ANTHROPIC_API_KEY) {
+    return {
+      varName: 'ANTHROPIC_API_KEY',
+      value: process.env.ANTHROPIC_API_KEY,
+    };
+  }
+  const fromFile = readEnvFile([
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_API_KEY',
+  ]);
+  if (fromFile.CLAUDE_CODE_OAUTH_TOKEN) {
+    return {
+      varName: 'CLAUDE_CODE_OAUTH_TOKEN',
+      value: fromFile.CLAUDE_CODE_OAUTH_TOKEN,
+    };
+  }
+  if (fromFile.ANTHROPIC_API_KEY) {
+    return {
+      varName: 'ANTHROPIC_API_KEY',
+      value: fromFile.ANTHROPIC_API_KEY,
+    };
+  }
+  return undefined;
 }
 
 function buildVolumeMounts(
@@ -199,18 +242,27 @@ function buildVolumeMounts(
       fs.cpSync(srcDir, dstDir, { recursive: true, dereference: true });
     }
   }
-  // Copy host Claude credentials so the container agent authenticates
-  // directly with Anthropic using the host's OAuth identity.
-  const hostCredentials = path.join(
-    process.env.HOME ?? '/root',
-    '.claude',
-    '.credentials.json',
-  );
-  if (fs.existsSync(hostCredentials)) {
-    fs.copyFileSync(
-      hostCredentials,
-      path.join(groupSessionsDir, '.credentials.json'),
+  // Anthropic auth: prefer a long-lived credential from .env (CLAUDE_CODE_OAUTH_TOKEN
+  // or ANTHROPIC_API_KEY) over the host's short-lived OAuth credentials file.
+  // The env-var path is delivered via `-e` in buildContainerArgs and avoids
+  // mounting any credentials file at all. The file-mount path remains as a
+  // fallback for installs that haven't configured a long-lived credential.
+  const credFile = path.join(groupSessionsDir, '.credentials.json');
+  if (getLongLivedClaudeAuth()) {
+    // Remove any stale credentials file left over from a previous run so the
+    // in-container SDK can't pick up an expired token instead of the env var.
+    if (fs.existsSync(credFile)) fs.unlinkSync(credFile);
+  } else {
+    // Copy host Claude credentials so the container agent authenticates
+    // directly with Anthropic using the host's OAuth identity.
+    const hostCredentials = path.join(
+      process.env.HOME ?? '/root',
+      '.claude',
+      '.credentials.json',
     );
+    if (fs.existsSync(hostCredentials)) {
+      fs.copyFileSync(hostCredentials, credFile);
+    }
   }
 
   mounts.push({
@@ -325,6 +377,17 @@ async function buildContainerArgs(
     logger.warn(
       { containerName },
       'OneCLI gateway not reachable — container will have no credentials',
+    );
+  }
+
+  // Pass a long-lived Anthropic credential through if configured. Must run
+  // AFTER the OneCLI strip loop above so this addition isn't removed.
+  const longLivedAuth = getLongLivedClaudeAuth();
+  if (longLivedAuth) {
+    args.push('-e', `${longLivedAuth.varName}=${longLivedAuth.value}`);
+    logger.debug(
+      { containerName, varName: longLivedAuth.varName },
+      'Using long-lived Anthropic credential from env',
     );
   }
 

@@ -23,7 +23,7 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 
 ## Secrets / Credentials / Proxy (OneCLI)
 
-Anthropic auth uses host credentials (`~/.claude/.credentials.json`) mounted into containers. Anthropic traffic bypasses OneCLI via `NO_PROXY`. Other API keys and secrets are managed by the OneCLI gateway. Run `onecli --help`.
+Anthropic auth: if `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY` is set in `.env`, it's passed into containers as an env var and the host credentials file is not mounted. Otherwise, falls back to mounting `~/.claude/.credentials.json` from the host — note that file holds a short-lived OAuth token (~hours TTL) and causes recurring 401s on long-running containers, so the long-lived env-var path is preferred. Either way, Anthropic traffic bypasses OneCLI via `NO_PROXY`. Other API keys and secrets are managed by the OneCLI gateway. Run `onecli --help`.
 
 ## Skills
 

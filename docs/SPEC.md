@@ -397,7 +397,7 @@ The token can be extracted from `~/.claude/.credentials.json` if you're logged i
 ANTHROPIC_API_KEY=sk-ant-api03-...
 ```
 
-Only the authentication variables (`CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`) are extracted from `.env` and written to `data/env/env`, then mounted into the container at `/workspace/env-dir/env` and sourced by the entrypoint script. This ensures other environment variables in `.env` are not exposed to the agent. This workaround is needed because some container runtimes lose `-e` environment variables when using `-i` (interactive mode with piped stdin).
+Only the authentication variables (`CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`) are read from `.env` by `container-runner.ts` and passed into the container as `-e` env vars. When either is set, the host's `~/.claude/.credentials.json` is **not** mounted (and any stale per-group copy under `data/sessions/<group>/.claude/` is removed at spawn time) so the in-container SDK uses only the long-lived credential. If neither variable is set, NanoClaw falls back to copying the host's `~/.claude/.credentials.json` into each group's session dir and mounting it — but that file holds a short-lived OAuth token (hours of validity) and causes recurring 401s on containers spawned when the host token has lapsed or that idle past the token's expiry, so the env-var path is strongly preferred.
 
 ### Changing the Assistant Name
 
