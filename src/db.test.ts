@@ -7,6 +7,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getLastBotMessageTimestamp,
+  getLatestThreadId,
   getMessagesSince,
   getNewMessages,
   getTaskById,
@@ -67,6 +68,49 @@ describe('storeMessage', () => {
     expect(messages[0].sender).toBe('123@s.whatsapp.net');
     expect(messages[0].sender_name).toBe('Alice');
     expect(messages[0].content).toBe('hello world');
+  });
+
+  it('stores and retrieves thread_id', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: 'msg-topic',
+      chat_jid: 'group@g.us',
+      sender: '123@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'topic message',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      thread_id: '93',
+    });
+
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Andy',
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0].thread_id).toBe('93');
+  });
+
+  it('returns null thread_id when not set', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    storeMessage({
+      id: 'msg-no-topic',
+      chat_jid: 'group@g.us',
+      sender: '123@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'general message',
+      timestamp: '2024-01-01T00:00:01.000Z',
+    });
+
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Andy',
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0].thread_id).toBeNull();
   });
 
   it('filters out empty content', () => {
@@ -374,6 +418,50 @@ describe('getMessagesSince', () => {
     const prompt = formatMessages(msgs, 'Asia/Jerusalem');
     const messageTagCount = (prompt.match(/<message /g) || []).length;
     expect(messageTagCount).toBe(10);
+  });
+
+  it('getLatestThreadId returns thread_id of the most recent non-bot message', () => {
+    storeMessage({
+      id: 'm-topic',
+      chat_jid: 'group@g.us',
+      sender: 'Alice@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'in topic',
+      timestamp: '2024-01-01T00:00:05.000Z',
+      thread_id: '93',
+    });
+    storeMessage({
+      id: 'm-general',
+      chat_jid: 'group@g.us',
+      sender: 'Alice@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'in general',
+      timestamp: '2024-01-01T00:00:06.000Z',
+    });
+
+    expect(getLatestThreadId('group@g.us', 'Andy')).toBeNull();
+  });
+
+  it('getLatestThreadId returns thread_id when latest message is in a topic', () => {
+    storeMessage({
+      id: 'm-general2',
+      chat_jid: 'group@g.us',
+      sender: 'Alice@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'in general',
+      timestamp: '2024-01-01T00:00:05.000Z',
+    });
+    storeMessage({
+      id: 'm-topic2',
+      chat_jid: 'group@g.us',
+      sender: 'Alice@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'in topic',
+      timestamp: '2024-01-01T00:00:06.000Z',
+      thread_id: '42',
+    });
+
+    expect(getLatestThreadId('group@g.us', 'Andy')).toBe('42');
   });
 
   it('filters pre-migration bot messages via content prefix backstop', () => {

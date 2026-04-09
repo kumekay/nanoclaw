@@ -216,7 +216,7 @@ export class TelegramChannel implements Channel {
       });
 
       logger.info(
-        { chatJid, chatName, sender: senderName },
+        { chatJid, chatName, sender: senderName, threadId },
         'Telegram message stored',
       );
     });
@@ -645,11 +645,13 @@ export class TelegramChannel implements Channel {
     const timestamp = new Date(ctx.message.date * 1000).toISOString();
     const content = textContent ?? ctx.message.caption ?? '';
 
+    const threadIdStr = threadId.toString();
+    await this.setTyping(chatJid, true, threadIdStr);
     try {
       const result = await handler.handle({
         group,
         chatJid,
-        threadId: threadId.toString(),
+        threadId: threadIdStr,
         message: {
           id: ctx.message.message_id.toString(),
           chat_jid: chatJid,
@@ -658,7 +660,7 @@ export class TelegramChannel implements Channel {
           content,
           timestamp,
           is_from_me: false,
-          thread_id: threadId.toString(),
+          thread_id: threadIdStr,
         },
         media,
         reply: async (
@@ -684,6 +686,8 @@ export class TelegramChannel implements Channel {
         'topic handler threw — falling back to default flow',
       );
       return false;
+    } finally {
+      await this.setTyping(chatJid, false, threadIdStr);
     }
   }
 
@@ -749,35 +753,43 @@ export class TelegramChannel implements Channel {
   // Telegram typing indicators expire after ~5s, so we resend every 4s
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
-  async setTyping(jid: string, isTyping: boolean): Promise<void> {
+  async setTyping(
+    jid: string,
+    isTyping: boolean,
+    threadId?: string,
+  ): Promise<void> {
     if (!this.bot) return;
 
-    const existing = this.typingIntervals.get(jid);
+    const key = `${jid}:${threadId || ''}`;
+    const existing = this.typingIntervals.get(key);
     if (!isTyping) {
       if (existing) {
         clearInterval(existing);
-        this.typingIntervals.delete(jid);
+        this.typingIntervals.delete(key);
       }
       return;
     }
 
-    // Already typing for this jid
+    // Already typing for this jid+thread
     if (existing) return;
 
     const numericId = jid.replace(/^tg:/, '');
+    const opts = threadId
+      ? { message_thread_id: parseInt(threadId, 10) }
+      : {};
     const sendTyping = () => {
       this.bot?.api
-        .sendChatAction(numericId, 'typing')
+        .sendChatAction(numericId, 'typing', opts)
         .catch((err) =>
           logger.debug(
-            { jid, err },
+            { jid, threadId, err },
             'Failed to send Telegram typing indicator',
           ),
         );
     };
 
     sendTyping();
-    this.typingIntervals.set(jid, setInterval(sendTyping, 4000));
+    this.typingIntervals.set(key, setInterval(sendTyping, 4000));
   }
 }
 

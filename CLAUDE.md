@@ -52,6 +52,8 @@ Before creating a PR, adding a skill, or preparing any contribution, you MUST re
 
 ## Development
 
+Always use red/green TDD: write failing tests first, then implement code to make them pass.
+
 Run commands directly—don't tell the user to run them.
 
 ```bash

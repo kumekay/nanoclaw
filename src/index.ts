@@ -37,6 +37,7 @@ import {
   deleteSession,
   getAllTasks,
   getLastBotMessageTimestamp,
+  getLatestThreadId,
   getMessagesSince,
   getNewMessages,
   getRouterState,
@@ -281,7 +282,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
+  // Use the most recent message's thread_id for the typing indicator.
+  // Re-query at reply time since piped messages may change the active thread.
+  const initialThreadId = missedMessages[missedMessages.length - 1]?.thread_id;
+  const latestThreadId = () =>
+    getLatestThreadId(chatJid, ASSISTANT_NAME) ?? undefined;
+
+  await channel.setTyping?.(chatJid, true, initialThreadId);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -296,8 +303,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        await channel.setTyping?.(chatJid, false);
-        await channel.sendMessage(chatJid, text);
+        const threadId = latestThreadId();
+        await channel.setTyping?.(chatJid, false, threadId);
+        await channel.sendMessage(chatJid, text, threadId);
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -313,7 +321,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
-  await channel.setTyping?.(chatJid, false);
+  await channel.setTyping?.(chatJid, false, latestThreadId());
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -526,8 +534,10 @@ async function startMessageLoop(): Promise<void> {
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
             // Show typing indicator while the container processes the piped message
+            const pipeThreadId =
+              messagesToSend[messagesToSend.length - 1]?.thread_id;
             channel
-              .setTyping?.(chatJid, true)
+              .setTyping?.(chatJid, true, pipeThreadId)
               ?.catch((err) =>
                 logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
               );

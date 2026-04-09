@@ -952,6 +952,20 @@ describe('TelegramChannel', () => {
 
       // No error, no API call
     });
+
+    it('sends message to the correct topic when threadId is provided', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.sendMessage('tg:100200300', 'topic reply', '93');
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        'topic reply',
+        { parse_mode: 'Markdown', message_thread_id: 93 },
+      );
+    });
   });
 
   // --- ownsJid ---
@@ -996,6 +1010,7 @@ describe('TelegramChannel', () => {
       expect(currentBot().api.sendChatAction).toHaveBeenCalledWith(
         '100200300',
         'typing',
+        {},
       );
     });
 
@@ -1031,6 +1046,63 @@ describe('TelegramChannel', () => {
       await expect(
         channel.setTyping('tg:100200300', true),
       ).resolves.toBeUndefined();
+    });
+
+    it('passes message_thread_id when threadId is provided', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.setTyping('tg:100200300', true, '42');
+
+      expect(currentBot().api.sendChatAction).toHaveBeenCalledWith(
+        '100200300',
+        'typing',
+        { message_thread_id: 42 },
+      );
+    });
+
+    it('does not pass message_thread_id when threadId is omitted', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.setTyping('tg:100200300', true);
+
+      expect(currentBot().api.sendChatAction).toHaveBeenCalledWith(
+        '100200300',
+        'typing',
+        {},
+      );
+    });
+
+    it('uses separate intervals for different topics in the same group', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      await channel.setTyping('tg:100200300', true, '10');
+      await channel.setTyping('tg:100200300', true, '20');
+
+      // Both topics should trigger sendChatAction
+      expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(2);
+      expect(currentBot().api.sendChatAction).toHaveBeenCalledWith(
+        '100200300',
+        'typing',
+        { message_thread_id: 10 },
+      );
+      expect(currentBot().api.sendChatAction).toHaveBeenCalledWith(
+        '100200300',
+        'typing',
+        { message_thread_id: 20 },
+      );
+
+      // Stopping one topic should not stop the other
+      await channel.setTyping('tg:100200300', false, '10');
+      // Topic 20 is still active — starting it again should be a no-op
+      currentBot().api.sendChatAction.mockClear();
+      await channel.setTyping('tg:100200300', true, '20');
+      expect(currentBot().api.sendChatAction).not.toHaveBeenCalled();
     });
   });
 
@@ -1196,6 +1268,73 @@ describe('TelegramChannel', () => {
         'tg:100200300',
         expect.objectContaining({ content: 'still delivered' }),
       );
+    });
+
+    it('shows typing indicator in the topic while handler runs', async () => {
+      const stub = makeStubHandler();
+      topicHandlerRef.current = stub;
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({
+        text: 'diary entry',
+        messageThreadId: 5,
+      });
+      await triggerTextMessage(ctx);
+
+      // sendChatAction should have been called with the topic's thread id
+      expect(currentBot().api.sendChatAction).toHaveBeenCalledWith(
+        '100200300',
+        'typing',
+        { message_thread_id: 5 },
+      );
+    });
+
+    it('stops typing indicator after topic handler completes', async () => {
+      const stub = makeStubHandler();
+      topicHandlerRef.current = stub;
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({
+        text: 'diary entry',
+        messageThreadId: 5,
+      });
+      await triggerTextMessage(ctx);
+
+      // Typing should have been started then stopped — the interval should be cleared.
+      // Starting typing again for same topic should trigger a new sendChatAction call.
+      currentBot().api.sendChatAction.mockClear();
+      await channel.setTyping('tg:100200300', true, '5');
+      expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops typing indicator even when topic handler throws', async () => {
+      const stub = {
+        name: 'broken',
+        handle: vi.fn().mockRejectedValue(new Error('boom')),
+      };
+      topicHandlerRef.current = stub;
+
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createTextCtx({
+        text: 'entry',
+        messageThreadId: 5,
+      });
+      await triggerTextMessage(ctx);
+
+      // Typing should be stopped despite the error.
+      // Starting typing again should trigger a new sendChatAction call.
+      currentBot().api.sendChatAction.mockClear();
+      await channel.setTyping('tg:100200300', true, '5');
+      expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(1);
     });
 
     it('does not dispatch when no group is registered for the chat', async () => {
