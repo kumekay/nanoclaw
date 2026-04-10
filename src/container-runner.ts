@@ -392,6 +392,11 @@ async function buildContainerArgs(
     );
   }
 
+  // Pass Home Assistant server URL (token injected by OneCLI proxy)
+  const hassVars = readEnvFile(['HASS_SERVER']);
+  const hassServer = process.env.HASS_SERVER || hassVars.HASS_SERVER;
+  if (hassServer) args.push('-e', `HASS_SERVER=${hassServer}`);
+
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
 

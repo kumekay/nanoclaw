@@ -1,6 +1,13 @@
 # NanoClaw Agent Container
 # Runs Claude Agent SDK in isolated Linux VM with browser automation
 
+# --- Stage 1: Build ha CLI (Go static binary) ---
+FROM golang:1.22-bookworm AS ha-builder
+WORKDIR /build
+COPY ha-cli/ .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /ha .
+
+# --- Stage 2: Main container ---
 FROM node:24-trixie-slim
 
 # Install system dependencies for Chromium
@@ -50,6 +57,9 @@ RUN npm run build
 
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
+
+# Install ha CLI (static Go binary from builder stage)
+COPY --from=ha-builder /ha /usr/local/bin/ha
 
 # Create entrypoint script
 # Container input (prompt, group info) is passed via stdin JSON.
