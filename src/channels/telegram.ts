@@ -774,9 +774,7 @@ export class TelegramChannel implements Channel {
     if (existing) return;
 
     const numericId = jid.replace(/^tg:/, '');
-    const opts = threadId
-      ? { message_thread_id: parseInt(threadId, 10) }
-      : {};
+    const opts = threadId ? { message_thread_id: parseInt(threadId, 10) } : {};
     const sendTyping = () => {
       this.bot?.api
         .sendChatAction(numericId, 'typing', opts)
