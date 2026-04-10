@@ -271,13 +271,14 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Mount gws CLI credentials so container agents can access Google Workspace APIs
+  // Mount gws CLI credentials so container agents can access Google Workspace APIs.
+  // Must be writable so gws can persist refreshed OAuth tokens back to disk.
   const gwsConfigDir = path.join(process.env.HOME ?? '/root', '.config', 'gws');
   if (fs.existsSync(gwsConfigDir)) {
     mounts.push({
       hostPath: gwsConfigDir,
       containerPath: '/home/node/.config/gws',
-      readonly: true,
+      readonly: false,
     });
   }
 
