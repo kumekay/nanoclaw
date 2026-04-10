@@ -777,6 +777,73 @@ describe('TelegramChannel', () => {
       );
     });
 
+    it('replies with transcription echo after voice transcription', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({ messageId: 42 });
+      await triggerMediaMessage('message:voice', ctx);
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        expect.stringContaining('Transcription'),
+        expect.objectContaining({
+          reply_to_message_id: 42,
+          parse_mode: 'HTML',
+        }),
+      );
+    });
+
+    it('replies with transcription echo after video transcription', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({ messageId: 55 });
+      await triggerMediaMessage('message:video', ctx);
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        expect.stringContaining('Hello world'),
+        expect.objectContaining({
+          reply_to_message_id: 55,
+          parse_mode: 'HTML',
+        }),
+      );
+    });
+
+    it('does not send transcription echo when transcription fails', async () => {
+      mockTranscribeAudio.mockResolvedValueOnce(null);
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({});
+      await triggerMediaMessage('message:voice', ctx);
+
+      expect(currentBot().api.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('sends transcription echo in the correct topic thread', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const ctx = createMediaCtx({ messageId: 77, messageThreadId: 93 });
+      await triggerMediaMessage('message:voice', ctx);
+
+      expect(currentBot().api.sendMessage).toHaveBeenCalledWith(
+        '100200300',
+        expect.stringContaining('Hello world'),
+        expect.objectContaining({
+          reply_to_message_id: 77,
+          message_thread_id: 93,
+          parse_mode: 'HTML',
+        }),
+      );
+    });
+
     it('stores document with filename', async () => {
       const opts = createTestOpts();
       const channel = new TelegramChannel('test-token', opts);

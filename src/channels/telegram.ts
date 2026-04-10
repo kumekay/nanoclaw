@@ -401,15 +401,20 @@ export class TelegramChannel implements Channel {
       );
 
       let content: string;
+      let transcript: string | null = null;
       try {
         if (!buffer) throw new Error('Failed to download file');
-        const transcript = await transcribeAudio(buffer, filename);
+        transcript = await transcribeAudio(buffer, filename);
         content = transcript
           ? `[${label}: ${transcript}]${caption}`
           : `[${label} - transcription unavailable]${caption}`;
       } catch (err) {
         logger.error({ err, chatJid, label }, 'Transcription pipeline failed');
         content = `[${label} - transcription failed]${caption}`;
+      }
+
+      if (transcript && this.bot) {
+        this.sendTranscriptionEcho(ctx, transcript);
       }
 
       this.opts.onMessage(chatJid, {
@@ -482,17 +487,22 @@ export class TelegramChannel implements Channel {
       );
 
       let content: string;
+      let transcript: string | null = null;
       try {
         if (!videoBuffer) throw new Error('Failed to download file');
         const audioBuffer = await extractAudioFromVideo(videoBuffer, '.mp4');
         if (!audioBuffer) throw new Error('Failed to extract audio from video');
-        const transcript = await transcribeAudio(audioBuffer, 'audio.ogg');
+        transcript = await transcribeAudio(audioBuffer, 'audio.ogg');
         content = transcript
           ? `[${label}: ${transcript}]${caption}`
           : `[${label} - transcription unavailable]${caption}`;
       } catch (err) {
         logger.error({ err, chatJid, label }, 'Video transcription failed');
         content = `[${label} - transcription failed]${caption}`;
+      }
+
+      if (transcript && this.bot) {
+        this.sendTranscriptionEcho(ctx, transcript);
       }
 
       this.opts.onMessage(chatJid, {
@@ -689,6 +699,24 @@ export class TelegramChannel implements Channel {
     } finally {
       await this.setTyping(chatJid, false, threadIdStr);
     }
+  }
+
+  private sendTranscriptionEcho(ctx: any, transcript: string): void {
+    if (!this.bot) return;
+    const chatId = ctx.chat.id.toString();
+    const msgId = ctx.message.message_id;
+    const threadId = ctx.message.message_thread_id;
+    const html = `🎤 <i>Transcription:</i>\n<blockquote expandable>${transcript}</blockquote>`;
+    const opts: Record<string, any> = {
+      reply_to_message_id: msgId,
+      parse_mode: 'HTML' as const,
+    };
+    if (threadId !== undefined) {
+      opts.message_thread_id = threadId;
+    }
+    this.bot.api.sendMessage(chatId, html, opts).catch((err) => {
+      logger.debug({ err }, 'Failed to send transcription echo');
+    });
   }
 
   async sendMessage(
